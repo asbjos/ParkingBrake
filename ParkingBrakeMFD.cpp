@@ -46,6 +46,10 @@ double SpeedLimit = 0.1; // m/s
 bool wantToLand = false;
 double wantToLandTime = -10.0; // initial value, must be within 5 seconds of current systime, which is always > 0.
 
+const int PARK_LOG_MAX_LENGTH = 3;
+char ParkingLog[PARK_LOG_MAX_LENGTH][80];
+int parkLogLength = 0;
+
 // Constructor
 Parker::Parker(DWORD w, DWORD h, VESSEL* vessel) : MFD2(w, h, vessel)
 {
@@ -115,7 +119,7 @@ bool Parker::Update(oapi::Sketchpad* skp)
 		switch (ParkMode)
 		{
 		case LOWSPEED:
-			sprintf(cbuf, "Auto mode: low speed");
+			sprintf(cbuf, "Auto mode: low speed (%.2f)", SpeedLimit);
 			break;
 		case GLUE:
 			sprintf(cbuf, "Auto mode: contact");
@@ -143,6 +147,19 @@ bool Parker::Update(oapi::Sketchpad* skp)
 		yIdx++;
 	}
 
+	// Print log of parkings.
+	sprintf(cbuf, "Log:");
+	skp->Text(X, Y * 5, cbuf, strlen(cbuf));
+	yIdx++;
+
+	for (int i = 0; i < min(parkLogLength, PARK_LOG_MAX_LENGTH); i++)
+	{
+		sprintf(cbuf, "  %s", ParkingLog[i]);
+		skp->Text(X, Y * (6 + i) , cbuf, strlen(cbuf));
+		yIdx++;
+	}
+
+	// And finish with this vessel's status.
 	int flightStatus = Vessel->GetFlightStatus();
 	if (flightStatus == 1 || flightStatus == 3)
 	{
@@ -205,7 +222,13 @@ void ParkVessel(VESSEL* ves)
 
 	char vName[50];
 	oapiGetObjectName(obj, vName, 50);
-	oapiWriteLogV("Parking Brake parked %s at %.1f", vName, oapiGetSimTime());
+	for (int i = PARK_LOG_MAX_LENGTH - 1; i > 0; i--)
+	{
+		strcpy(ParkingLog[i], ParkingLog[i - 1]); // 2 cpy 1, 1 cpy 0.
+	}
+	sprintf(ParkingLog[0], "%.1f: parked %s", oapiGetSimTime(), vName);
+	parkLogLength++;
+	parkLogLength = min(parkLogLength, PARK_LOG_MAX_LENGTH);
 
 	wantToLand = false; // reset want to land wish, as we now have landed. (for manual landing when not in contact with ground)
 }
@@ -217,10 +240,13 @@ bool Parker::ConsumeKeyBuffered(DWORD key)
 	switch (key)
 	{
 	case OAPI_KEY_O:
-		AutoPark = !AutoPark;
+		AutoPark = !AutoPark; // swithes between true and false.
 		return true;
 	case OAPI_KEY_N:
-		// Park current vessel now! (if on surface, that is?) Or maybe have a "You sure" if not landed?
+		// Park current vessel now!
+		// If on the ground, the first condition applies.
+		// If not, you first get the third condition, and then when clicking again within 5 seconds,
+		// you get the second condition.
 		if (Vessel->GroundContact())
 		{
 			ParkVessel(Vessel);
@@ -236,7 +262,7 @@ bool Parker::ConsumeKeyBuffered(DWORD key)
 		}
 		return true;
 	case OAPI_KEY_M:
-		ParkMode = PARKMODE((int(ParkMode) + 1) % int(LASTENTRY));
+		ParkMode = PARKMODE((int(ParkMode) + 1) % int(LASTENTRY)); // cycles between available parkmodes
 		return true;
 	}
 
@@ -247,7 +273,7 @@ DLLCLBK void opcPreStep(double simt, double simdt, double mjd)
 {
 	if (AutoPark)
 	{
-		for (int i = 0; i < oapiGetVesselCount(); i++)
+		for (int i = 0; i < (int)oapiGetVesselCount(); i++)
 		{
 			VESSEL* v = oapiGetVesselInterface(oapiGetVesselByIndex(i));
 
@@ -256,7 +282,7 @@ DLLCLBK void opcPreStep(double simt, double simdt, double mjd)
 			if ((flightStatus == 0 || flightStatus == 2) && v->GroundContact()) // not landed state, but with ground contact. Investigate further.
 			{
 				int thrustersActive = 0;
-				for (int j = 0; j < v->GetThrusterCount(); j++)
+				for (int j = 0; j < (int)v->GetThrusterCount(); j++)
 				{
 					if (v->GetThrusterLevel(v->GetThrusterHandleByIndex(j)) != 0.0)
 					{

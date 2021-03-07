@@ -35,7 +35,7 @@ private:
 	VESSEL* Vessel; // current target vessel
 };
 
-enum PARKMODE { LOWSPEED, GLUE, LASTENTRY };
+enum PARKMODE { LOWSPEED, GLUE, LAUNCH, LASTENTRY };
 
 int g_MFDmode; // identifier for new MFD mode
 
@@ -46,9 +46,10 @@ double SpeedLimit = 0.1; // m/s
 bool wantToLand = false;
 double wantToLandTime = -10.0; // initial value, must be within 5 seconds of current systime, which is always > 0.
 
-const int PARK_LOG_MAX_LENGTH = 3;
+const int PARK_LOG_MAX_LENGTH = 5;
 char ParkingLog[PARK_LOG_MAX_LENGTH][80];
 int parkLogLength = 0;
+bool MFDActive = true;
 
 // Constructor
 Parker::Parker(DWORD w, DWORD h, VESSEL* vessel) : MFD2(w, h, vessel)
@@ -105,7 +106,7 @@ bool Parker::Update(oapi::Sketchpad* skp)
 	char cbuf[50];
 
 	int X = W / 10;
-	int Y = H / 10;
+	int Y = H / 13;
 	int yIdx = 1;
 	double simt = oapiGetSimTime();
 	double syst = oapiGetSysTime();
@@ -123,6 +124,9 @@ bool Parker::Update(oapi::Sketchpad* skp)
 			break;
 		case GLUE:
 			sprintf(cbuf, "Auto mode: contact");
+			break;
+		case LAUNCH:
+			sprintf(cbuf, "Auto mode: launch control");
 			break;
 		case LASTENTRY:
 			sprintf(cbuf, "Hæ? %.2f", simt);
@@ -164,13 +168,13 @@ bool Parker::Update(oapi::Sketchpad* skp)
 	if (flightStatus == 1 || flightStatus == 3)
 	{
 		sprintf(cbuf, "This vessel is LANDED");
-		skp->Text(X, Y * 9, cbuf, strlen(cbuf));
+		skp->Text(X, H - Y, cbuf, strlen(cbuf));
 	}
 	else
 	{
 
 		sprintf(cbuf, "This vessel is NOT landed");
-		skp->Text(X, Y * 9, cbuf, strlen(cbuf));
+		skp->Text(X, H - Y, cbuf, strlen(cbuf));
 	}
 	
 	return true;
@@ -241,6 +245,7 @@ bool Parker::ConsumeKeyBuffered(DWORD key)
 	{
 	case OAPI_KEY_O:
 		AutoPark = !AutoPark; // swithes between true and false.
+		InvalidateButtons();
 		return true;
 	case OAPI_KEY_N:
 		// Park current vessel now!
@@ -281,22 +286,32 @@ DLLCLBK void opcPreStep(double simt, double simdt, double mjd)
 			int flightStatus = v->GetFlightStatus(); // 0 - free, 1 - landed, 2 - docked free, 3 - docked landed
 			if ((flightStatus == 0 || flightStatus == 2) && v->GroundContact()) // not landed state, but with ground contact. Investigate further.
 			{
-				int thrustersActive = 0;
-				for (int j = 0; j < (int)v->GetThrusterCount(); j++)
+				if (ParkMode == LAUNCH) // park if main/hover/retro is not full thrust (emulating a hold down). Idea by Arvil https://www.orbiter-forum.com/threads/parking-brake-mfd.39703/#post-578439
 				{
-					if (v->GetThrusterLevel(v->GetThrusterHandleByIndex(j)) != 0.0)
+					if (v->GetThrusterGroupLevel(THGROUP_MAIN) != 1.0 && v->GetThrusterGroupLevel(THGROUP_HOVER) != 1.0 && v->GetThrusterGroupLevel(THGROUP_RETRO) != 1.0) // none is full power
 					{
-						thrustersActive++;
-						break; // already found one active thruster, so stop searching, as next condition is already void.
+						ParkVessel(v);
 					}
 				}
-
-				if (thrustersActive == 0) // i.e. we are now in contact with a planet, but not landed, and have no thrusters on.
+				else // different ParkMode
 				{
-					if (ParkMode == GLUE || v->GetGroundspeed() < SpeedLimit) // either glue mode, or must have speed lower than some value.
+					int thrustersActive = 0;
+					for (int j = 0; j < (int)v->GetThrusterCount(); j++)
 					{
-						// Park the current vessel
-						ParkVessel(v);
+						if (v->GetThrusterLevel(v->GetThrusterHandleByIndex(j)) != 0.0)
+						{
+							thrustersActive++;
+							break; // already found one active thruster, so stop searching, as next condition is already void.
+						}
+					}
+
+					if (thrustersActive == 0) // i.e. we are now in contact with a planet, but not landed, and have no thrusters on.
+					{
+						if (ParkMode == GLUE || v->GetGroundspeed() < SpeedLimit) // either glue mode, or must have speed lower than some value.
+						{
+							// Park the current vessel
+							ParkVessel(v);
+						}
 					}
 				}
 			}
@@ -306,6 +321,17 @@ DLLCLBK void opcPreStep(double simt, double simdt, double mjd)
 
 DLLCLBK void InitModule(HINSTANCE hDLL)
 {
+	FILEHANDLE cfgFile = oapiOpenFile("MFD\\ParkingBrake.cfg", FILE_IN, CONFIG);
+
+	if (!oapiReadItem_bool(cfgFile, "ActivateMFD", MFDActive)) oapiWriteLog("Parking Brake could not read MFD activation setting.");
+	if (!oapiReadItem_bool(cfgFile, "DefAutoPark", AutoPark)) oapiWriteLog("Parking Brake could not read AutoPark setting.");
+	int parkMode = int(ParkMode); // get default value set to ParkMode.
+	if (!oapiReadItem_int(cfgFile, "DefParkMode", parkMode)) oapiWriteLog("Parking Brake could not read ParkMode setting."); // try to populate a new value.
+	ParkMode = PARKMODE(parkMode % int(LASTENTRY)); // insert the value back into ParkMode.
+	if (!oapiReadItem_float(cfgFile, "DefSpeedLimit", SpeedLimit)) oapiWriteLog("Parking Brake could not read SpeedLimit setting.");
+
+	oapiCloseFile(cfgFile, FILE_IN);
+
 	MFDMODESPECEX spec;
 	spec.name = "Parking Brake";
 	spec.key = OAPI_KEY_P;                // MFD mode selection key
@@ -313,17 +339,7 @@ DLLCLBK void InitModule(HINSTANCE hDLL)
 	spec.msgproc = Parker::MsgProc;  // MFD mode callback function
 
 	// Register the new MFD mode with Orbiter
-	g_MFDmode = oapiRegisterMFDMode(spec);
-
-	FILEHANDLE cfgFile = oapiOpenFile("MFD\\ParkingBrake.cfg", FILE_IN, CONFIG);
-
-	if (!oapiReadItem_bool(cfgFile, "DefAutoPark", AutoPark)) oapiWriteLog("Parking Brake could not read AutoPark setting.");
-	int parkMode = int(LOWSPEED);
-	if (!oapiReadItem_int(cfgFile, "DefParkMode", parkMode)) oapiWriteLog("Parking Brake could not read ParkMode setting.");
-	ParkMode = PARKMODE(parkMode % int(LASTENTRY));
-	if (!oapiReadItem_float(cfgFile, "DefSpeedLimit", SpeedLimit)) oapiWriteLog("Parking Brake could not read SpeedLimit setting.");
-
-	oapiCloseFile(cfgFile, FILE_IN);
+	if (MFDActive) g_MFDmode = oapiRegisterMFDMode(spec); // try this.
 }
 
 DLLCLBK void ExitModule(HINSTANCE hDLL)

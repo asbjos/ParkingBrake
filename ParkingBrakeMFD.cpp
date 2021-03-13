@@ -245,7 +245,7 @@ bool Parker::ConsumeKeyBuffered(DWORD key)
 	{
 	case OAPI_KEY_O:
 		AutoPark = !AutoPark; // swithes between true and false.
-		InvalidateButtons();
+		InvalidateButtons(); // refresh button listing, as we've changed the setup.
 		return true;
 	case OAPI_KEY_N:
 		// Park current vessel now!
@@ -339,7 +339,7 @@ DLLCLBK void InitModule(HINSTANCE hDLL)
 	spec.msgproc = Parker::MsgProc;  // MFD mode callback function
 
 	// Register the new MFD mode with Orbiter
-	if (MFDActive) g_MFDmode = oapiRegisterMFDMode(spec); // try this.
+	if (MFDActive) g_MFDmode = oapiRegisterMFDMode(spec); // possibility to disable MFD listing. Idea by francisdrake https://www.orbiter-forum.com/threads/parking-brake-mfd.39703/#post-578444
 }
 
 DLLCLBK void ExitModule(HINSTANCE hDLL)
